@@ -1,0 +1,173 @@
+# trigger: master
+
+pr: none
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+
+parameters:
+  - name: resourceGroup
+    displayName: Resource Group
+    type: string
+    default: 'rg-eastus-terraform-02'
+    values:
+    - rg-eastus-terraform-02
+    - rg-eastus-terraform-01
+  - name: networkname
+    displayName: Virtual Network Name
+    type: string
+    default: virtualnet-eastus-01
+    values:
+    - virtualnet-eastus-01
+    - virtualnet-eastus-02
+  - name: vmSize
+    displayName: Virtual Machine Size
+    type: string
+    default: "Standard_F2"
+    values:
+      - "Standard_F2"
+      - "Standard_F1"
+  - name: vmName
+    displayName: Virtual Machine Name
+    type: string
+    default: "vm-eastus-01"
+    values:
+      - "vm-eastus-01"
+      - "vm-eastus-02"
+  - name: cosmosDB
+    displayName: Cosmos DB name
+    type: string
+    default: "cosmosdb-eastus-01"
+    values:
+      - "cosmosdb-eastus-01"
+      - "cosmosdb-eastus-02"
+  - name: dbKind
+    displayName: Cosmos DB kind
+    type: string
+    default: "GlobalDocumentDB"
+    values:
+      - "GlobalDocumentDB"
+      - "MongoDB"
+
+
+variables:
+ GLOBAL_TERRAFORM_SUBSCRIPTION_ENV_VAR: $(terraform-subscription)
+
+name: my-test-job
+
+stages :
+  - stage: initvalidate
+    jobs:
+    - job: Teraform_init
+      displayName: Terraform init
+      steps:
+        - task: AzureCLI@2
+          inputs:
+           azureSubscription: 'Azure subscription 1 $env:TERRAFORM_SUBSCRIPTION_ENV_VAR'
+           scriptType: 'bash'
+           scriptLocation: 'inlineScript'
+           inlineScript: |
+            $env:ARM_CLIENT_ID       ??= $env:servicePrincipalId
+            $env:ARM_CLIENT_SECRET   ??= $env:servicePrincipalKey          
+            $env:ARM_TENANT_ID       ??= $(az account show --query tenantId -o tsv)
+            $env:ARM_SUBSCRIPTION_ID ??= $(az account show --query id -o tsv)
+           addSpnToEnvironment: true
+           useGlobalConfig: true
+           failOnStandardError: true 
+           workingDirectory: $(System.DefaultWorkingDirectory)/resources/
+
+        - task: Terraform@2
+          inputs:
+           TemplatePath: '$$(System.DefaultWorkingDirectory)/resources/'
+           Arguments: 'init'
+           InstallTerraform: true
+           UseAzureSub: true
+           ConnectedServiceNameSelector: 'ConnectedServiceNameARM'
+           ConnectedServiceNameARM: 'Azure subscription 1 $env:TERRAFORM_SUBSCRIPTION_ENV_VAR'
+           ManageState: true
+           SpecifyStorageAccount: true
+           StorageAccountResourceGroup: 'rg-test-eastus-01'
+           StorageAccountRM: 'stgtesteastus01'
+           StorageContainerName: 'tfstate'
+
+        - task: TerraformTaskV2@2
+          inputs:
+           provider: 'azurerm'
+           command: 'validate'
+           workingDirectory: '$(System.DefaultWorkingDirectory)/resources/'
+
+  - stage: initplan        
+    dependsOn: [initvalidate]
+    condition: succeeded('initvalidate')
+    jobs:
+      - job: terraform_plan
+        steps:
+        - task: Terraform@2
+          inputs:
+           TemplatePath: '$$(System.DefaultWorkingDirectory)/resources/'
+           Arguments: 'init'
+           InstallTerraform: true
+           UseAzureSub: true
+           ConnectedServiceNameSelector: 'ConnectedServiceNameARM'
+           ConnectedServiceNameARM: 'Azure subscription 1 $env:TERRAFORM_SUBSCRIPTION_ENV_VAR'
+           ManageState: true
+           SpecifyStorageAccount: true
+           StorageAccountResourceGroup: 'rg-test-eastus-01'
+           StorageAccountRM: 'stgtesteastus01'
+           StorageContainerName: 'tfstate'
+
+        - task: TerraformTaskV2@2
+          inputs:
+           provider: 'azurerm'
+           command: 'plan'
+           workingDirectory: '$(System.DefaultWorkingDirectory)/resources/'
+           commandOptions: '-input=true var=${{ parameters.resourceGroup }} -var=${{ parameters.networkname }} -var=${{ parameters.vmName }} -var=${{ parameters.vmSize }} -var=${{ parameters.cosmosDB }} -var=${{ parameters.dbKind }}'
+           backendServiceArm: 'Azure subscription 1 $env:TERRAFORM_SUBSCRIPTION_ENV_VAR'
+           backendAzureRmResourceGroupName: 'rg-test-eastus-01'
+           backendAzureRmStorageAccountName: 'stgtesteastus01'
+           backendAzureRmContainerName: 'tfstate'
+           backendAzureRmKey: 'terraform.tfstate'
+
+  - stage: initapply
+    dependsOn: [initplan]
+    condition: succeeded('iinitplan')
+    jobs:
+      - job: terraform_apply
+        steps:
+        - task: Terraform@2
+          inputs:
+           TemplatePath: '$$(System.DefaultWorkingDirectory)/resources/'
+           Arguments: 'init'
+           InstallTerraform: true
+           UseAzureSub: true
+           ConnectedServiceNameSelector: 'ConnectedServiceNameARM'
+           ConnectedServiceNameARM: 'Azure subscription 1 $env:TERRAFORM_SUBSCRIPTION_ENV_VAR'
+           ManageState: true
+           SpecifyStorageAccount: true
+           StorageAccountResourceGroup: 'rg-test-eastus-01'
+           StorageAccountRM: 'stgtesteastus01'
+           StorageContainerName: 'tfstate'
+        - task: TerraformTaskV2@2
+          inputs:
+           provider: 'azurerm'
+           command: 'plan'
+           workingDirectory: '$(System.DefaultWorkingDirectory)/resources/'
+           commandOptions: '-input=true -var=${{ parameters.resourceGroup }} -var=${{ parameters.networkname }} -var=${{ parameters.vmName }} -var=${{ parameters.vmSize }} -var=${{ parameters.cosmosDB }} -var=${{ parameters.dbKind }}'
+           backendServiceArm: 'Azure subscription 1 $env:TERRAFORM_SUBSCRIPTION_ENV_VAR'
+           backendAzureRmResourceGroupName: 'rg-test-eastus-01'
+           backendAzureRmStorageAccountName: 'stgtesteastus01'
+           backendAzureRmContainerName: 'tfstate'
+           backendAzureRmKey: 'terraform.tfstate'
+
+        - task: TerraformTaskV2@2
+          inputs:
+           provider: 'azurerm'
+           command: 'apply'
+           workingDirectory: '$(System.DefaultWorkingDirectory)/resources/'
+           commandOptions: '-input=true -auto-approve -var=${{ parameters.resourceGroup }} -var=${{ parameters.networkname }} -var=${{ parameters.vmName }} -var=${{ parameters.vmSize }} -var=${{ parameters.cosmosDB }} -var=${{ parameters.dbKind }}'
+           backendServiceArm: 'Azure subscription 1 $env:TERRAFORM_SUBSCRIPTION_ENV_VAR'
+           backendAzureRmResourceGroupName: 'rg-test-eastus-01'
+           backendAzureRmStorageAccountName: 'stgtesteastus01'
+           backendAzureRmContainerName: 'tfstate'
+           backendAzureRmKey: 'terraform.tfstate'
